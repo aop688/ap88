@@ -842,7 +842,8 @@ static int play_file(ma_engine *engine, const char *path, int gui)
         float pos = 0;
         ma_sound_get_cursor_in_seconds(&sound, &pos);
         double t = now_seconds();
-        float dt = (float)(t - last);
+        /* 恢复播放时 ma_engine_start 会阻塞一百多毫秒，限制单帧步长，免得动画一步跳完 */
+        float dt = fminf((float)(t - last), 1.0f / 30);
         last = t;
 
         int key;
