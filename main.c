@@ -4,6 +4,7 @@
  * 用法: ap88 [-g] <音乐目录>
  *   -g  在图形窗口中显示频谱（需要编译时找到 raylib）
  * 按键: 空格 暂停/继续   n 下一首   q 退出（终端和窗口里都可以按）
+ *       f 切换全屏（仅 -g 窗口模式）
  *
  * 频谱可视化移植自 musializer (https://github.com/tsoding/musializer, MIT)
  */
@@ -30,6 +31,10 @@
 #ifdef AP88_GUI
 #include "raylib.h"
 #include "rlgl.h"
+#ifdef __APPLE__
+#include <objc/message.h>
+#include <objc/runtime.h>
+#endif
 #endif
 
 /* ---------- 播放列表 ---------- */
@@ -584,6 +589,18 @@ static void fft_render(Rectangle boundary, size_t m)
     EndShaderMode();
 }
 
+static void toggle_fullscreen(void)
+{
+#ifdef __APPLE__
+    /* raylib 的 ToggleFullscreen/ToggleBorderlessWindowed 在 macOS 上会切换显示器分辨率，
+     * 这里改用系统原生全屏（同绿色按钮）：独立桌面、隐藏菜单栏、不改分辨率 */
+    id window = (id)GetWindowHandle();
+    ((void (*)(id, SEL, id))objc_msgSend)(window, sel_registerName("toggleFullScreen:"), NULL);
+#else
+    ToggleBorderlessWindowed();
+#endif
+}
+
 /* 画一帧窗口并收集按键；窗口字体不含中文，歌名放在窗口标题和终端状态行里 */
 static int gui_frame(const char *name, float pos, float len, int paused, float dt)
 {
@@ -624,7 +641,12 @@ static int gui_frame(const char *name, float pos, float len, int paused, float d
     if (WindowShouldClose() || IsKeyPressed(KEY_Q)) return 'q';
     if (IsKeyPressed(KEY_N)) return 'n';
     if (IsKeyPressed(KEY_SPACE)) return ' ';
-    return read_key(0);
+    int key = read_key(0);
+    if (IsKeyPressed(KEY_F) || key == 'f') {
+        toggle_fullscreen();
+        return 0;
+    }
+    return key;
 }
 #endif
 
@@ -742,7 +764,7 @@ int main(int argc, char **argv)
 #ifdef AP88_GUI
     if (gui) {
         gui_init();
-        printf("共 %zu 首  [空格 暂停  n 下一首  q 退出]\n", pl.count);
+        printf("共 %zu 首  [空格 暂停  n 下一首  f 全屏  q 退出]\n", pl.count);
     }
 #endif
     term_raw(!gui);

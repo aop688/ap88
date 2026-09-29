@@ -6,7 +6,7 @@ ifeq ($(shell uname -s),Darwin)
 LDLIBS += -framework CoreFoundation -framework CoreAudio -framework AudioToolbox
 RAYLIB_PREFIX ?= $(shell brew --prefix raylib 2>/dev/null)
 RAYLIB_CFLAGS ?= -I$(RAYLIB_PREFIX)/include
-RAYLIB_LIBS   ?= -L$(RAYLIB_PREFIX)/lib -lraylib
+RAYLIB_LIBS   ?= -L$(RAYLIB_PREFIX)/lib -lraylib -lobjc
 HAVE_RAYLIB   := $(wildcard $(RAYLIB_PREFIX)/include/raylib.h)
 else
 LDLIBS += -ldl
