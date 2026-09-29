@@ -527,65 +527,221 @@ static void gui_close(void)
     CloseWindow();
 }
 
-static void fft_render(Rectangle boundary, size_t m)
+/* 发光球和拖尾共用同一张 1x1 纹理 + circle shader，形状完全由 shader 按纹理坐标算出 */
+static Texture2D glow_texture(void)
 {
-    float cell_width = boundary.width / m;
-    float saturation = 0.75f;
-    float value = 1.0f;
+    return (Texture2D){rlGetTextureIdDefault(), 1, 1, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+}
 
-    /* 柱子 */
+static void fft_glowing_ball(Vector2 center, float radius, Color color)
+{
+    DrawTextureEx(glow_texture(), (Vector2){center.x - radius, center.y - radius}, 0, 2 * radius, color);
+}
+
+/* 拖尾：取纹理上半圆（下边缘最亮），拉伸成 width x |smear-center|，
+ * 亮的一端放在球心，旋转到指向 smear 的方向 */
+static void fft_glowing_smear(Vector2 center, Vector2 smear, float width, Color color)
+{
+    float dx = smear.x - center.x, dy = smear.y - center.y;
+    float len = sqrtf(dx * dx + dy * dy);
+    if (len < 0.5f) return;
+    /* DrawTexturePro 的 origin 既是旋转中心，也会把整个矩形往回平移 origin，
+     * 所以 dest 的 x/y 直接填球心，origin 取矩形底边中点，正好让底边中点落在球心。
+     * 矩形默认朝上 (0,-1)，顺时针转 θ 后是 (sinθ, -cosθ)，要对齐 atan2(dy,dx) 就得 +90 度 */
+    Rectangle dest = {center.x, center.y, width, len};
+    Vector2 origin = {width / 2, len};
+    float angle = atan2f(dy, dx) * RAD2DEG + 90;
+    DrawTexturePro(glow_texture(), (Rectangle){0, 0, 1, 0.5f}, dest, origin, angle, color);
+}
+
+/* ---------- 频谱球：播放时附着在茎顶，暂停时脱离漂浮 ---------- */
+
+typedef enum { BALL_ATTACHED, BALL_DETACHED, BALL_ATTACHING } Ball_State;
+
+typedef struct {
+    Ball_State state;
+    Vector2 center;
+    Vector2 smear;    /* 拖尾末端，追着球心跑 */
+    Vector2 velocity;
+    Vector2 repulse;
+    float radius;
+} Ball;
+
+static Ball balls[FFT_SIZE];
+static int balls_ready;
+
+/* 以下速度都以“一格柱子宽度”为单位，窗口/全屏大小变化时观感不变 */
+#define BALL_FLOAT_SPEED   10.0f /* 漂浮速度 格/秒 */
+#define BALL_MIN_DIST       4.0f /* 球心最小间距 格 */
+#define BALL_MIN_RADIUS     2.0f /* 漂浮时的最小半径 格，免得静音时暂停的球小到看不见 */
+#define BALL_NOISE         20.0f /* 随机扰动 格/秒^2 */
+#define BALL_REPULSE       30.0f /* 排斥力系数 1/秒^2 */
+#define BALL_ATTACH_SPEED  10.0f /* 飞回茎顶的追赶系数 1/秒 */
+#define SMEAR_SPEED         6.0f /* 拖尾追赶系数 1/秒（原版为 3） */
+
+/* 调色板：每首歌随机一个色相偏移，渐变过去 */
+static float hue_shift, hue_target;
+
+static float rand01(void)
+{
+    return (float)((double)rand() / RAND_MAX);
+}
+
+static void palette_next(void)
+{
+    static int first = 1;
+    hue_target = rand01();
+    if (first) hue_shift = hue_target;
+    first = 0;
+}
+
+static Color bin_color(size_t i, size_t m)
+{
+    float hue = fmodf((float)i / m + hue_shift, 1.0f);
+    return ColorFromHSV(hue * 360, 0.75f, 1.0f);
+}
+
+static float rand_unit(void)
+{
+    return rand01() * 2 - 1;
+}
+
+static Vector2 rand_dir(void)
+{
+    float a = rand01() * 2 * PI;
+    return (Vector2){cosf(a), sinf(a)};
+}
+
+static void balls_update(Rectangle boundary, size_t m, int paused, float dt)
+{
+    float cell = boundary.width / m;
+
     for (size_t i = 0; i < m; i++) {
+        Ball *b = &balls[i];
         float t = out_smooth[i];
-        Color color = ColorFromHSV((float)i / m * 360, saturation, value);
-        Vector2 start = {
-            boundary.x + i * cell_width + cell_width / 2,
+        Vector2 top = {
+            boundary.x + i * cell + cell / 2,
             boundary.y + boundary.height - boundary.height * 2 / 3 * t,
         };
-        Vector2 end = {
-            boundary.x + i * cell_width + cell_width / 2,
-            boundary.y + boundary.height,
-        };
-        DrawLineEx(start, end, cell_width / 3 * sqrtf(t), color);
+        float r = cell * 6 * sqrtf(t);
+
+        if (!balls_ready) {
+            b->state = BALL_ATTACHED;
+            b->center = b->smear = top;
+            b->radius = r;
+        }
+
+        if (paused && b->state != BALL_DETACHED) {
+            b->state = BALL_DETACHED;
+            b->velocity = rand_dir();
+            b->velocity.x *= BALL_FLOAT_SPEED * cell;
+            b->velocity.y *= BALL_FLOAT_SPEED * cell;
+        } else if (!paused && b->state == BALL_DETACHED) {
+            b->state = BALL_ATTACHING;
+        }
+
+        switch (b->state) {
+        case BALL_ATTACHED:
+            b->center = top;
+            b->radius = r;
+            break;
+        case BALL_ATTACHING: {
+            float k = fminf(BALL_ATTACH_SPEED * dt, 1);
+            b->center.x += (top.x - b->center.x) * k;
+            b->center.y += (top.y - b->center.y) * k;
+            b->radius += (r - b->radius) * k;
+            float dx = top.x - b->center.x, dy = top.y - b->center.y;
+            if (dx * dx + dy * dy < cell * cell / 4) b->state = BALL_ATTACHED;
+        } break;
+        case BALL_DETACHED:
+            if (b->radius < BALL_MIN_RADIUS * cell)
+                b->radius += (BALL_MIN_RADIUS * cell - b->radius) * fminf(3 * dt, 1);
+            break;
+        }
+    }
+    balls_ready = 1;
+
+    /* 漂浮的球两两排斥：距离小于最小间距就按重叠量互相推开 */
+    float min_dist = BALL_MIN_DIST * cell;
+    for (size_t i = 0; i < m; i++) balls[i].repulse = (Vector2){0};
+    for (size_t i = 0; i < m; i++) {
+        if (balls[i].state != BALL_DETACHED) continue;
+        for (size_t j = i + 1; j < m; j++) {
+            if (balls[j].state != BALL_DETACHED) continue;
+            float dx = balls[i].center.x - balls[j].center.x;
+            float dy = balls[i].center.y - balls[j].center.y;
+            float d = sqrtf(dx * dx + dy * dy);
+            if (d >= min_dist) continue;
+            Vector2 dir = d > 1e-3f ? (Vector2){dx / d, dy / d} : rand_dir();
+            float push = min_dist - d;
+            balls[i].repulse.x += dir.x * push; balls[i].repulse.y += dir.y * push;
+            balls[j].repulse.x -= dir.x * push; balls[j].repulse.y -= dir.y * push;
+        }
     }
 
-    Texture2D texture = {rlGetTextureIdDefault(), 1, 1, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+    float speed = BALL_FLOAT_SPEED * cell;
+    for (size_t i = 0; i < m; i++) {
+        Ball *b = &balls[i];
+        if (b->state == BALL_DETACHED) {
+            b->velocity.x += (b->repulse.x * BALL_REPULSE + rand_unit() * BALL_NOISE * cell) * dt;
+            b->velocity.y += (b->repulse.y * BALL_REPULSE + rand_unit() * BALL_NOISE * cell) * dt;
+            /* 速率固定，排斥和噪声只改变方向，保持悠闲漂浮 */
+            float v = sqrtf(b->velocity.x * b->velocity.x + b->velocity.y * b->velocity.y);
+            if (v > 1e-3f) {
+                b->velocity.x *= speed / v;
+                b->velocity.y *= speed / v;
+            }
+            /* 位置也直接修正一部分重叠，避免挤成一团 */
+            float k = fminf(5 * dt, 1);
+            b->center.x += b->velocity.x * dt + b->repulse.x * k;
+            b->center.y += b->velocity.y * dt + b->repulse.y * k;
 
-    /* 拖尾 */
+            /* 碰到边界反弹 */
+            float pad = b->radius * 0.14f; /* 可见球芯约为纹理的 7%，即 2*radius*0.07 */
+            float x0 = boundary.x + pad, x1 = boundary.x + boundary.width - pad;
+            float y0 = boundary.y + pad, y1 = boundary.y + boundary.height - pad;
+            if (b->center.x < x0) { b->center.x = x0; b->velocity.x = fabsf(b->velocity.x); }
+            if (b->center.x > x1) { b->center.x = x1; b->velocity.x = -fabsf(b->velocity.x); }
+            if (b->center.y < y0) { b->center.y = y0; b->velocity.y = fabsf(b->velocity.y); }
+            if (b->center.y > y1) { b->center.y = y1; b->velocity.y = -fabsf(b->velocity.y); }
+        }
+
+        float k = fminf(SMEAR_SPEED * dt, 1);
+        b->smear.x += (b->center.x - b->smear.x) * k;
+        b->smear.y += (b->center.y - b->smear.y) * k;
+    }
+}
+
+static void fft_render(Rectangle boundary, size_t m, int paused, float dt)
+{
+    float cell_width = boundary.width / m;
+
+    hue_shift += (hue_target - hue_shift) * fminf(2 * dt, 1);
+    balls_update(boundary, m, paused, dt);
+
+    /* 茎：始终按当前频谱高度画，暂停时随频谱回落而缩回 */
+    for (size_t i = 0; i < m; i++) {
+        float t = out_smooth[i];
+        float x = boundary.x + i * cell_width + cell_width / 2;
+        Vector2 start = {x, boundary.y + boundary.height - boundary.height * 2 / 3 * t};
+        Vector2 end = {x, boundary.y + boundary.height};
+        DrawLineEx(start, end, cell_width / 3 * sqrtf(t), bin_color(i, m));
+    }
+
+    /* 拖尾：power 小一些，光更散 */
     SetShaderValue(circle, circle_radius_loc, (float[1]){0.3f}, SHADER_UNIFORM_FLOAT);
     SetShaderValue(circle, circle_power_loc, (float[1]){3.0f}, SHADER_UNIFORM_FLOAT);
     BeginShaderMode(circle);
-    for (size_t i = 0; i < m; i++) {
-        float start = out_smear[i];
-        float end = out_smooth[i];
-        Color color = ColorFromHSV((float)i / m * 360, saturation, value);
-        float x = boundary.x + i * cell_width + cell_width / 2;
-        float y0 = boundary.y + boundary.height - boundary.height * 2 / 3 * start;
-        float y1 = boundary.y + boundary.height - boundary.height * 2 / 3 * end;
-        float radius = cell_width * 3 * sqrtf(end);
-        if (y1 >= y0) {
-            Rectangle dest = {x - radius / 2, y0, radius, y1 - y0};
-            DrawTexturePro(texture, (Rectangle){0, 0, 1, 0.5f}, dest, (Vector2){0}, 0, color);
-        } else {
-            Rectangle dest = {x - radius / 2, y1, radius, y0 - y1};
-            DrawTexturePro(texture, (Rectangle){0, 0.5f, 1, 0.5f}, dest, (Vector2){0}, 0, color);
-        }
-    }
+    for (size_t i = 0; i < m; i++)
+        fft_glowing_smear(balls[i].center, balls[i].smear, balls[i].radius / 2, bin_color(i, m));
     EndShaderMode();
 
-    /* 顶端光点 */
+    /* 球：球芯占纹理的 7%，外圈 bloom */
     SetShaderValue(circle, circle_radius_loc, (float[1]){0.07f}, SHADER_UNIFORM_FLOAT);
     SetShaderValue(circle, circle_power_loc, (float[1]){5.0f}, SHADER_UNIFORM_FLOAT);
     BeginShaderMode(circle);
-    for (size_t i = 0; i < m; i++) {
-        float t = out_smooth[i];
-        Color color = ColorFromHSV((float)i / m * 360, saturation, value);
-        Vector2 center = {
-            boundary.x + i * cell_width + cell_width / 2,
-            boundary.y + boundary.height - boundary.height * 2 / 3 * t,
-        };
-        float radius = cell_width * 6 * sqrtf(t);
-        DrawTextureEx(texture, (Vector2){center.x - radius, center.y - radius}, 0, 2 * radius, color);
-    }
+    for (size_t i = 0; i < m; i++)
+        fft_glowing_ball(balls[i].center, balls[i].radius, bin_color(i, m));
     EndShaderMode();
 }
 
@@ -601,7 +757,7 @@ static void toggle_fullscreen(void)
 #endif
 }
 
-/* 画一帧窗口并收集按键；窗口字体不含中文，歌名放在窗口标题和终端状态行里 */
+/* 画一帧窗口并收集按键 */
 static int gui_frame(const char *name, float pos, float len, int paused, float dt)
 {
     printf("\r\033[K%s %s  [%02d:%02d / %02d:%02d]",
@@ -615,7 +771,7 @@ static int gui_frame(const char *name, float pos, float len, int paused, float d
 
     BeginDrawing();
     ClearBackground(GetColor(0x151515FF));
-    fft_render((Rectangle){0, 0, w, h - 40}, m);
+    fft_render((Rectangle){0, 0, w, h - 40}, m, paused, dt);
 
     /* 底部进度条 + 时间 */
     const char *time_str = TextFormat("%02d:%02d / %02d:%02d",
@@ -672,6 +828,7 @@ static int play_file(ma_engine *engine, const char *path, int gui)
     if (gui) {
         SetWindowTitle(name);
         title_font_load(name);
+        palette_next();
     }
 #endif
     ma_sound_start(&sound);
