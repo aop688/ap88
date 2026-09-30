@@ -504,11 +504,57 @@ static void title_font_load(const char *name)
     title_font_loaded = 1;
 }
 
+#ifdef __APPLE__
+#define MSG(ret, ...) ((ret (*)(id, SEL, ##__VA_ARGS__))objc_msgSend)
+
+/* 去掉 macOS 标题栏：内容铺满整个窗口、标题栏透明、隐藏红绿灯按钮。
+ * 仍保留 titled 样式，所以圆角、边缘缩放和系统原生全屏都照常可用 */
+static void hide_titlebar(void)
+{
+    id window = (id)GetWindowHandle();
+    unsigned long mask = MSG(unsigned long)(window, sel_registerName("styleMask"));
+    MSG(void, unsigned long)(window, sel_registerName("setStyleMask:"), mask | (1UL << 15)); /* FullSizeContentView */
+    MSG(void, BOOL)(window, sel_registerName("setTitlebarAppearsTransparent:"), YES);
+    MSG(void, long)(window, sel_registerName("setTitleVisibility:"), 1); /* NSWindowTitleHidden */
+    for (long b = 0; b < 3; b++) /* 关闭 / 最小化 / 缩放 */
+        MSG(void, BOOL)(MSG(id, long)(window, sel_registerName("standardWindowButton:"), b),
+                        sel_registerName("setHidden:"), YES);
+    /* 内容视图变大了，重设一次尺寸让 raylib 拿到新的帧缓冲大小 */
+    SetWindowSize(GetScreenWidth(), GetScreenHeight());
+}
+
+static int window_is_fullscreen(void)
+{
+    id window = (id)GetWindowHandle();
+    return (MSG(unsigned long)(window, sel_registerName("styleMask")) & (1UL << 14)) != 0;
+}
+
+/* 没有标题栏后，按住窗口任意位置拖动来移动窗口 */
+static void window_drag(void)
+{
+    static int dragging;
+    static Vector2 grab;
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !window_is_fullscreen()) {
+        dragging = 1;
+        grab = GetMousePosition();
+    }
+    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) dragging = 0;
+    if (dragging) {
+        Vector2 m = GetMousePosition(), wp = GetWindowPosition();
+        if (m.x != grab.x || m.y != grab.y)
+            SetWindowPosition((int)(wp.x + m.x - grab.x), (int)(wp.y + m.y - grab.y));
+    }
+}
+#endif
+
 static void gui_init(void)
 {
     SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
     InitWindow(1000, 600, "ap88");
+#ifdef __APPLE__
+    hide_titlebar();
+#endif
     SetExitKey(KEY_NULL); /* 退出统一走 q / 关闭窗口 */
     SetTargetFPS(60);
     circle = LoadShaderFromMemory(NULL, circle_fs);
@@ -797,6 +843,9 @@ static int gui_frame(const char *name, float pos, float len, int paused, float d
     if (WindowShouldClose() || IsKeyPressed(KEY_Q)) return 'q';
     if (IsKeyPressed(KEY_N)) return 'n';
     if (IsKeyPressed(KEY_SPACE)) return ' ';
+#ifdef __APPLE__
+    window_drag();
+#endif
     int key = read_key(0);
     if (IsKeyPressed(KEY_F) || key == 'f') {
         toggle_fullscreen();
