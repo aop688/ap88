@@ -11,7 +11,10 @@ HAVE_RAYLIB   := $(wildcard $(RAYLIB_PREFIX)/include/raylib.h)
 else
 LDLIBS += -ldl
 RAYLIB_CFLAGS ?= $(shell pkg-config --cflags raylib 2>/dev/null)
-RAYLIB_LIBS   ?= $(shell pkg-config --libs raylib 2>/dev/null)
+# 静态链接的 libraylib.a 直接引用了少量 X11 符号，而 raylib.pc 的
+# Libs.private 是空的，pkg-config 不会带上 -lX11，这里补上
+#（有的系统没装 x11.pc 但库文件在，找不到 .pc 时直接给 -lX11）
+RAYLIB_LIBS   ?= $(shell pkg-config --libs raylib 2>/dev/null) $(shell pkg-config --libs x11 2>/dev/null || echo -lX11)
 HAVE_RAYLIB   := $(RAYLIB_LIBS)
 endif
 

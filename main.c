@@ -457,6 +457,9 @@ static const char *font_paths[] = {
     "/Library/Fonts/Arial Unicode.ttf",
     "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
     "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "/usr/local/share/fonts/LXGWWenKai-Regular.ttf",
+    "/usr/local/share/fonts/LXGWWenKaiMono-Regular.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
 };
 #define FONT_LOAD_SIZE 64 /* 按大字号栅格化再缩小画，高分屏上也清晰 */
 
