@@ -807,7 +807,7 @@ static void toggle_fullscreen(void)
 }
 
 /* 画一帧窗口并收集按键 */
-static int gui_frame(const char *name, float pos, float len, int paused, float dt)
+static int gui_frame(const char *name, float name_age, float pos, float len, int paused, float dt)
 {
     printf("\r\033[K%s %s  [%02d:%02d / %02d:%02d]",
            paused ? "||" : "> ", name,
@@ -831,7 +831,7 @@ static int gui_frame(const char *name, float pos, float len, int paused, float d
     if (len > 0)
         DrawRectangleRec((Rectangle){20, h - 25, track_w * pos / len, bar_h}, GetColor(0xBBBBBBFF));
     DrawText(time_str, (int)w - 20 - text_w, (int)h - 32, 20, GetColor(0xBBBBBBFF));
-    /* 左上角歌名，太长就缩小字号 */
+    /* 左上角歌名，太长就缩小字号；只显示 3 秒，最后半秒淡出 */
     Font font = title_font_loaded ? title_font : GetFontDefault();
     float size = 32, spacing = 1;
     float tw = MeasureTextEx(font, name, size, spacing).x;
@@ -839,7 +839,9 @@ static int gui_frame(const char *name, float pos, float len, int paused, float d
         size = fmaxf(size * (w - 40) / tw, 14);
         spacing = size / 32;
     }
-    DrawTextEx(font, name, (Vector2){20, 20}, size, spacing, GetColor(0xDDDDDDFF));
+    float name_alpha = fminf(fmaxf((3.0f - name_age) / 0.5f, 0), 1);
+    if (name_alpha > 0)
+        DrawTextEx(font, name, (Vector2){20, 20}, size, spacing, Fade(GetColor(0xDDDDDDFF), name_alpha));
     if (paused) DrawTextEx(font, "PAUSED", (Vector2){20, 20 + size + 10}, 24, 1, GetColor(0x888888FF));
     EndDrawing(); /* SetTargetFPS 在这里限速 */
 
@@ -887,6 +889,7 @@ static int play_file(ma_engine *engine, const char *path, int gui)
 
     int paused = 0;
     double last = now_seconds();
+    double start = last;
     int result = PLAY_NEXT;
     while (!ma_sound_at_end(&sound)) {
         if (quit_requested) { result = PLAY_QUIT; break; }
@@ -900,7 +903,7 @@ static int play_file(ma_engine *engine, const char *path, int gui)
 
         int key;
 #ifdef AP88_GUI
-        if (gui) key = gui_frame(name, pos, len, paused, dt);
+        if (gui) key = gui_frame(name, (float)(now_seconds() - start), pos, len, paused, dt);
         else
 #endif
         {
