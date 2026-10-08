@@ -548,6 +548,69 @@ static void window_drag(void)
             SetWindowPosition((int)(wp.x + m.x - grab.x), (int)(wp.y + m.y - grab.y));
     }
 }
+
+/* 裸可执行文件没有 .app 包，Cmd+Tab 和程序坞里只有黑色的 exec 图标。
+ * 这里按频谱的样子（彩色茎 + 发光球）现画一张图标，交给 NSApp 用 */
+static void set_app_icon(void)
+{
+    enum { S = 512, NBARS = 7 };
+    static const float heights[NBARS] = {0.40f, 0.62f, 0.88f, 0.70f, 1.00f, 0.58f, 0.36f};
+    const float body = 412, off = (S - body) / 2, corner = 92; /* 按 macOS 图标网格留边 */
+    const float cell = body / NBARS, stem_r = cell * 0.13f, ball_r = cell * 0.30f;
+    const float bottom = off + body * 0.84f, span = body * 0.60f;
+
+    Image img = GenImageColor(S, S, BLANK);
+    Color *px = img.data;
+    for (int y = 0; y < S; y++) {
+        for (int x = 0; x < S; x++) {
+            float fx = x + 0.5f, fy = y + 0.5f;
+            /* 圆角方块的有向距离，用来抗锯齿 */
+            float qx = fabsf(fx - S / 2.0f) - (body / 2 - corner);
+            float qy = fabsf(fy - S / 2.0f) - (body / 2 - corner);
+            float d = hypotf(fmaxf(qx, 0), fmaxf(qy, 0)) + fminf(fmaxf(qx, qy), 0) - corner;
+            float alpha = fminf(fmaxf(0.5f - d, 0), 1);
+            if (alpha <= 0) continue;
+
+            float t = (fy - off) / body;
+            float r = (38 - 24 * t) / 255, g = (38 - 24 * t) / 255, b = (43 - 27 * t) / 255;
+            for (int i = 0; i < NBARS; i++) {
+                float cx = off + cell * (i + 0.5f), top = bottom - span * heights[i];
+                Color c = ColorFromHSV(360.0f * i / NBARS, 0.75f, 1.0f);
+                float cr = c.r / 255.0f, cg = c.g / 255.0f, cb = c.b / 255.0f;
+                /* 茎：竖直胶囊，越往下越淡 */
+                float sy = fminf(fmaxf(fy, top), bottom);
+                float sd = hypotf(fx - cx, fy - sy) - stem_r;
+                float sa = fminf(fmaxf(0.5f - sd, 0), 1) * (1 - 0.65f * (sy - top) / (bottom - top));
+                r += (cr - r) * sa, g += (cg - g) * sa, b += (cb - b) * sa;
+                /* 球：外圈辉光叠加，球心偏白 */
+                float bd = hypotf(fx - cx, fy - top);
+                float glow = 0.55f * expf(-fmaxf(bd - ball_r, 0) / (ball_r * 0.5f));
+                r += cr * glow, g += cg * glow, b += cb * glow;
+                float ba = fminf(fmaxf(ball_r + 0.5f - bd, 0), 1);
+                float core = powf(fmaxf(1 - bd / ball_r, 0), 2) * 0.7f;
+                r += (cr + (1 - cr) * core - r) * ba;
+                g += (cg + (1 - cg) * core - g) * ba;
+                b += (cb + (1 - cb) * core - b) * ba;
+            }
+            px[y * S + x] = (Color){(unsigned char)(fminf(r, 1) * 255), (unsigned char)(fminf(g, 1) * 255),
+                                    (unsigned char)(fminf(b, 1) * 255), (unsigned char)(alpha * 255)};
+        }
+    }
+
+    int size = 0;
+    unsigned char *png = ExportImageToMemory(img, ".png", &size);
+    UnloadImage(img);
+    if (!png) return;
+    id data = MSG(id, const void *, unsigned long)((id)objc_getClass("NSData"),
+                                                   sel_registerName("dataWithBytes:length:"), png, (unsigned long)size);
+    MemFree(png);
+    id image = MSG(id)((id)objc_getClass("NSImage"), sel_registerName("alloc"));
+    image = MSG(id, id)(image, sel_registerName("initWithData:"), data);
+    if (!image) return;
+    id app = MSG(id)((id)objc_getClass("NSApplication"), sel_registerName("sharedApplication"));
+    MSG(void, id)(app, sel_registerName("setApplicationIconImage:"), image);
+    MSG(void)(image, sel_registerName("release"));
+}
 #endif
 
 static void gui_init(void)
@@ -557,6 +620,7 @@ static void gui_init(void)
     InitWindow(1000, 600, "ap88");
 #ifdef __APPLE__
     hide_titlebar();
+    set_app_icon();
 #endif
     SetExitKey(KEY_NULL); /* 退出统一走 q / 关闭窗口 */
     SetTargetFPS(60);
